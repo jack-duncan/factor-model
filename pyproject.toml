@@ -4,11 +4,13 @@ version = "0.1.0"
 description = "Interactive Fama-French factor model dashboard for US equities"
 requires-python = ">=3.12"
 dependencies = [
+    "nbformat>=5.10.4",
     "numpy>=2.4.3",
     "pandas>=2.3.3",
     "plotly>=6.6.0",
     "python-dotenv>=1.2.2",
     "scipy>=1.17.1",
+    "seaborn>=0.13.2",
     "statsmodels>=0.14.6",
     "streamlit>=1.55.0",
     "wrds>=3.1.6",
