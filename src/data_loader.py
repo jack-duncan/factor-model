@@ -42,7 +42,9 @@ def query(conn, sql):
         rows = cur.fetchall()
     df = pd.DataFrame(rows, columns=cols)
     for c in df.columns:
-        df[c] = pd.to_numeric(df[c], errors="ignore")
+        converted = pd.to_numeric(df[c], errors="coerce")
+        if converted.notna().sum() > 0:
+            df[c] = converted
     return df
 
 
@@ -76,12 +78,20 @@ def fetch_crsp_monthly(conn, start_date, end_date):
 
 
 def fetch_ff_factors(conn, start_date, end_date):
-    """Pull Fama-French 5 factors + momentum + risk-free rate."""
+    """Pull Fama-French 5 factors + momentum + risk-free rate.
+
+    FF3 + momentum lives in ff.factors_monthly.
+    RMW and CMA live in ff.fivefactors_monthly.
+    We join them on date so all 7 factors end up in one table.
+    """
     df = query(conn, f"""
-        SELECT date, mktrf, smb, hml, rmw, cma, umd, rf
-        FROM ff.factors_monthly
-        WHERE date BETWEEN '{start_date}' AND '{end_date}'
-        ORDER BY date
+        SELECT f3.date, f3.mktrf, f3.smb, f3.hml, f3.umd, f3.rf,
+               f5.rmw, f5.cma
+        FROM ff.factors_monthly f3
+        LEFT JOIN ff.fivefactors_monthly f5
+            ON f3.date = f5.date
+        WHERE f3.date BETWEEN '{start_date}' AND '{end_date}'
+        ORDER BY f3.date
     """)
     df["date"] = pd.to_datetime(df["date"])
     return df
