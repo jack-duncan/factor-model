@@ -69,7 +69,7 @@ def plot_exposure_heatmap(results_dict, selected_factors):
 
 
 def plot_rolling_betas(betas, selected_factors):
-    """Line chart of rolling factor exposures over time."""
+    """Line chart of rolling factor exposures over time, with idiosyncratic return."""
     if betas.empty:
         return go.Figure().add_annotation(text="Insufficient data for rolling betas", showarrow=False)
 
@@ -80,6 +80,13 @@ def plot_rolling_betas(betas, selected_factors):
                 x=betas["date"], y=betas[f],
                 name=_display(f), mode="lines",
             ))
+
+    if "idiosyncratic" in betas.columns:
+        fig.add_trace(go.Scatter(
+            x=betas["date"], y=betas["idiosyncratic"],
+            name="Idio", mode="lines",
+            line=dict(dash="dash", color="#FF7F0E", width=2),
+        ))
 
     fig.update_layout(
         title="Rolling Factor Exposures",
@@ -115,7 +122,7 @@ def plot_factor_attribution(contrib, returns_df, selected_factors):
 
     fig.add_trace(go.Scatter(
         x=contrib["date"], y=contrib["alpha"],
-        name="Alpha", stackgroup="one",
+        name="Idio", stackgroup="one",
         mode="lines", line=dict(width=0),
     ))
 
@@ -147,7 +154,7 @@ def plot_risk_decomposition(decomp):
     ----------
     decomp : dict {factor_name: fraction}
     """
-    labels = [_display(k) if k != "idiosyncratic" else "Idiosyncratic" for k in decomp]
+    labels = [_display(k) if k != "idiosyncratic" else "Idio" for k in decomp]
     values = list(decomp.values())
 
     fig = go.Figure(data=[go.Pie(

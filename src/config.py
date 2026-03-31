@@ -23,7 +23,7 @@ VALID_EXCHCD = [1, 2, 3]     # NYSE, AMEX, NASDAQ
 # ── Factor definitions ──
 FACTORS_PREBUILT = ["mktrf", "smb", "hml", "rmw", "cma", "umd"]
 FACTORS_CONSTRUCTED = ["volatility", "liquidity", "leverage", "growth", "log_size", "value"]
-ALL_FACTORS = FACTORS_PREBUILT + FACTORS_CONSTRUCTED
+ALL_FACTORS = FACTORS_PREBUILT
 
 FACTOR_DISPLAY_NAMES = {
     "mktrf": "MKT-RF",

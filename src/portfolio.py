@@ -5,14 +5,15 @@ import pandas as pd
 from src.factor_model import full_sample_regression
 
 
-def portfolio_returns(permnos, crsp, weight_scheme="equal"):
+def portfolio_returns(permnos, crsp, weight_scheme="equal", shares=None):
     """Compute portfolio return series for a set of stocks.
 
     Parameters
     ----------
     permnos : list of permno identifiers.
-    crsp : DataFrame with columns [permno, date, ret].
-    weight_scheme : 'equal' or 'mcap'.
+    crsp : DataFrame with columns [permno, date, ret, prc, mcap].
+    weight_scheme : 'equal', 'mcap', or 'shares'.
+    shares : dict {permno: n_shares}, required when weight_scheme='shares'.
 
     Returns
     -------
@@ -23,12 +24,30 @@ def portfolio_returns(permnos, crsp, weight_scheme="equal"):
 
     if weight_scheme == "equal":
         port = df.groupby("date")["ret"].mean().reset_index()
+
     elif weight_scheme == "mcap":
-        def _wcalc(g):
+        def _mcap_wcalc(g):
             w = g["mcap"] / g["mcap"].sum()
             return (w * g["ret"]).sum()
-        port = df.groupby("date").apply(_wcalc, include_groups=False).reset_index()
+        port = df.groupby("date").apply(_mcap_wcalc, include_groups=False).reset_index()
         port.columns = ["date", "ret"]
+
+    elif weight_scheme == "shares":
+        if not shares:
+            # Fall back to equal weight if no shares provided
+            port = df.groupby("date")["ret"].mean().reset_index()
+        else:
+            df["n_shares"] = df["permno"].map(shares).fillna(0)
+            # Position value = shares * |price|; weight = position / total
+            df["position"] = df["n_shares"] * df["prc"].abs()
+            def _shares_wcalc(g):
+                total = g["position"].sum()
+                if total == 0:
+                    return g["ret"].mean()
+                w = g["position"] / total
+                return (w * g["ret"]).sum()
+            port = df.groupby("date").apply(_shares_wcalc, include_groups=False).reset_index()
+            port.columns = ["date", "ret"]
     else:
         raise ValueError(f"Unknown weight_scheme: {weight_scheme}")
 

@@ -20,13 +20,13 @@ def build_universe(crsp, n=UNIVERSE_SIZE):
     monthly = monthly.dropna(subset=["mcap"])
 
     # Rank by market cap within each month, keep top n
+    monthly["_rank"] = monthly.groupby("date")["mcap"].rank(ascending=False, method="first")
     universe = (
-        monthly
-        .groupby("date", group_keys=False)
-        .apply(lambda g: g.nlargest(n, "mcap"))
+        monthly[monthly["_rank"] <= n]
         [["date", "permno", "mcap", "ticker", "comnam"]]
         .reset_index(drop=True)
     )
+    monthly.drop(columns=["_rank"], inplace=True)
 
     # Build ticker map: most recent ticker/name for each permno
     latest = (

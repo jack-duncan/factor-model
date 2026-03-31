@@ -69,6 +69,7 @@ def fetch_crsp_monthly(conn, start_date, end_date):
     """)
 
     df["date"] = pd.to_datetime(df["date"])
+    df["permno"] = df["permno"].astype("int64")
     df["ret"] = pd.to_numeric(df["ret"], errors="coerce")
     df["prc"] = pd.to_numeric(df["prc"], errors="coerce")
     df["shrout"] = pd.to_numeric(df["shrout"], errors="coerce")
@@ -111,6 +112,7 @@ def fetch_compustat_annual(conn, start_date, end_date):
             ORDER BY gvkey, datadate
         """)
         df["datadate"] = pd.to_datetime(df["datadate"])
+        df["gvkey"] = df["gvkey"].astype(str)
         return df
     except Exception as e:
         logger.warning("Compustat query failed (no access?): %s", e)
@@ -126,6 +128,8 @@ def fetch_ccm_link(conn):
             WHERE linktype IN ('LU', 'LC')
               AND linkprim IN ('P', 'C')
         """)
+        df["gvkey"] = df["gvkey"].astype(str)
+        df["permno"] = df["permno"].astype("int64")
         df["linkdt"] = pd.to_datetime(df["linkdt"])
         df["linkenddt"] = pd.to_datetime(df["linkenddt"])
         # Fill missing end dates with far future
@@ -138,11 +142,27 @@ def fetch_ccm_link(conn):
 
 # ── Caching ──────────────────────────────────────────────────────────────────
 
+# Canonical dtypes for key identifier columns — must be consistent across
+# fresh fetches, cached parquet, and any concat/merge operations.
+_CANONICAL_DTYPES = {
+    "permno": "int64",
+    "gvkey": str,
+}
+
+
+def _normalize_dtypes(df):
+    """Cast key identifier columns to canonical dtypes."""
+    for col, dtype in _CANONICAL_DTYPES.items():
+        if col in df.columns:
+            df[col] = df[col].astype(dtype)
+    return df
+
+
 def load_cached(name, directory=RAW_DATA_DIR):
     """Load a cached parquet file if it exists."""
     path = os.path.join(directory, f"{name}.parquet")
     if os.path.exists(path):
-        return pd.read_parquet(path)
+        return _normalize_dtypes(pd.read_parquet(path))
     return None
 
 
@@ -194,7 +214,7 @@ def incremental_fetch(conn, fetch_fn, name, start_date, end_date, dedup_cols=Non
         return cached  # graceful fallback (e.g. Compustat unavailable)
 
     if cached is not None and not new_data.empty:
-        combined = pd.concat([cached, new_data], ignore_index=True)
+        combined = _normalize_dtypes(pd.concat([cached, new_data], ignore_index=True))
         if dedup_cols:
             combined = combined.drop_duplicates(subset=dedup_cols, keep="last")
         else:
@@ -212,11 +232,10 @@ def incremental_fetch(conn, fetch_fn, name, start_date, end_date, dedup_cols=Non
 # ── Pipeline orchestrator ────────────────────────────────────────────────────
 
 def refresh_data(conn=None):
-    """Run the full data pipeline: fetch, build universe, construct factors.
+    """Run the full data pipeline: fetch, build universe, save FF factors.
 
     Returns a dict of all loaded DataFrames.
     """
-    from src.factors import build_all_factor_returns
     from src.universe import build_universe
 
     close_conn = False
@@ -235,17 +254,6 @@ def refresh_data(conn=None):
         conn, fetch_ff_factors, "ff_factors",
         START_DATE, end_date, dedup_cols=["date"],
     )
-    compustat = incremental_fetch(
-        conn, lambda c, s, e: fetch_compustat_annual(c, s, e),
-        "compustat_annual", START_DATE, end_date,
-        dedup_cols=["gvkey", "datadate"],
-    )
-    ccm_link = load_cached("ccm_link")
-    if ccm_link is None:
-        ccm_link = fetch_ccm_link(conn)
-        if ccm_link is not None:
-            save_cache(ccm_link, "ccm_link")
-
     if close_conn:
         conn.close()
 
@@ -254,16 +262,13 @@ def refresh_data(conn=None):
     save_cache(universe, "universe", PROCESSED_DATA_DIR)
     save_cache(ticker_map, "ticker_map", PROCESSED_DATA_DIR)
 
-    # 3. Construct factor returns
-    factor_returns = build_all_factor_returns(crsp, universe, ff, compustat, ccm_link)
-    save_cache(factor_returns, "factor_returns", PROCESSED_DATA_DIR)
+    # 3. Save FF factors as factor_returns (constructed factors disabled for now)
+    save_cache(ff, "factor_returns", PROCESSED_DATA_DIR)
 
     return {
         "crsp": crsp,
         "ff_factors": ff,
-        "compustat": compustat,
-        "ccm_link": ccm_link,
         "universe": universe,
         "ticker_map": ticker_map,
-        "factor_returns": factor_returns,
+        "factor_returns": ff,
     }

@@ -100,13 +100,14 @@ with st.sidebar:
     crsp["date"] = pd.to_datetime(crsp["date"])
     factor_returns["date"] = pd.to_datetime(factor_returns["date"])
 
-    min_date = crsp["date"].min().date()
+    min_date = pd.Timestamp(START_DATE).date()
     max_date = crsp["date"].max().date()
 
     st.subheader("Date Range")
+    default_start = min_date
     col1, col2 = st.columns(2)
     with col1:
-        start_date = st.date_input("Start", value=pd.Timestamp(START_DATE).date(),
+        start_date = st.date_input("Start", value=default_start,
                                    min_value=min_date, max_value=max_date)
     with col2:
         end_date = st.date_input("End", value=max_date,
@@ -126,11 +127,23 @@ with st.sidebar:
         options=ticker_options["label"].tolist(),
         default=[],
         placeholder="Type to search...",
+        max_selections=20,
     )
     # Map labels back to permnos
     selected_permnos = ticker_options[ticker_options["label"].isin(selected_labels)]["permno"].tolist()
 
-    weight_scheme = st.radio("Weighting", ["equal", "mcap"], horizontal=True)
+    weight_scheme = st.radio("Weighting", ["equal", "mcap", "shares"], horizontal=True)
+
+    # Shares input — one number field per selected ticker
+    shares_input = {}
+    if weight_scheme == "shares" and selected_permnos:
+        st.caption("Enter number of shares held:")
+        permno_to_label = dict(zip(ticker_options["permno"], ticker_options["ticker"]))
+        for p in selected_permnos:
+            label = permno_to_label.get(p, str(p))
+            shares_input[p] = st.number_input(
+                label, min_value=0, value=100, step=1, key=f"shares_{p}"
+            )
 
     st.divider()
 
@@ -146,9 +159,27 @@ with st.sidebar:
 
     st.divider()
 
-    # Rolling window
+    # Rolling window — bounds driven entirely by date range and factor count
     st.subheader("Rolling Window")
-    window = st.slider("Months", min_value=12, max_value=120, value=ROLLING_WINDOW, step=6)
+    date_range_months = max(7, (pd.Timestamp(end_date).to_period("M") - pd.Timestamp(start_date).to_period("M")).n + 1)
+    n_regressors = len(selected_factors) + 1 if selected_factors else 2
+    win_min = n_regressors + 1
+    win_max = date_range_months - 1
+    win_min = min(win_min, win_max)
+    default_window = max(win_min, min(ROLLING_WINDOW, win_max))
+
+    # Reset to default whenever date range or factor count changes
+    range_key = (start_date, end_date, len(selected_factors))
+    if st.session_state.get("_window_range_key") != range_key:
+        st.session_state["window_slider"] = default_window
+        st.session_state["_window_range_key"] = range_key
+    else:
+        # Clamp in case bounds tightened without a range change
+        st.session_state["window_slider"] = max(win_min, min(st.session_state.get("window_slider", default_window), win_max))
+
+    window = st.slider("Estimation window (months)", min_value=win_min, max_value=win_max,
+                       step=1, key="window_slider")
+
 
 
 # ── Filter data to date range ───────────────────────────────────────────────
@@ -171,7 +202,8 @@ if not selected_factors:
     st.stop()
 
 # Compute portfolio returns
-port_ret = portfolio_returns(selected_permnos, crsp_filtered, weight_scheme)
+port_ret = portfolio_returns(selected_permnos, crsp_filtered, weight_scheme,
+                             shares=shares_input if weight_scheme == "shares" else None)
 
 # Per-stock regressions
 stock_results = stock_factor_exposures(selected_permnos, crsp_filtered, ff_filtered, selected_factors)
@@ -181,6 +213,24 @@ port_result = full_sample_regression(port_ret, ff_filtered, selected_factors)
 
 # Build labels
 permno_to_ticker = dict(zip(ticker_map["permno"], ticker_map["ticker"]))
+
+# ── Factor equation banner ────────────────────────────────────────────────────
+if port_result is not None:
+    alpha = port_result.params["const"]
+    factor_terms = []
+    for f in selected_factors:
+        coef = port_result.params.get(f, 0)
+        sign = "+" if coef >= 0 else "-"
+        name = FACTOR_DISPLAY_NAMES.get(f, f).replace("-", r"\text{-}")
+        factor_terms.append(rf"{sign} {abs(coef):.3f} \cdot \text{{{name}}}")
+
+    alpha_sign = "+" if alpha >= 0 else "-"
+    latex_eq = (
+        rf"r_p - r_f = {alpha_sign} {abs(alpha):.3f} "
+        + " ".join(factor_terms)
+        + r" + \varepsilon"
+    )
+    st.latex(latex_eq)
 
 tab_holdings, tab_exposures, tab_rolling, tab_attribution = st.tabs(
     ["Portfolio Holdings", "Factor Exposures", "Rolling Exposures", "Attribution"]
@@ -198,13 +248,21 @@ with tab_holdings:
     n = len(holdings)
     if weight_scheme == "equal":
         holdings["weight"] = f"{100/n:.1f}%" if n > 0 else "0%"
-    else:
-        # Show latest mcap weights
+    elif weight_scheme == "mcap":
         latest_month = crsp_filtered.groupby("permno")["date"].max().reset_index()
         latest = crsp_filtered.merge(latest_month, on=["permno", "date"])
         latest = latest[latest["permno"].isin(selected_permnos)]
         total_mcap = latest["mcap"].sum()
         latest["weight"] = (latest["mcap"] / total_mcap * 100).round(1).astype(str) + "%"
+        holdings = holdings.merge(latest[["permno", "weight"]], on="permno", how="left")
+    else:  # shares
+        latest_month = crsp_filtered.groupby("permno")["date"].max().reset_index()
+        latest = crsp_filtered.merge(latest_month, on=["permno", "date"])
+        latest = latest[latest["permno"].isin(selected_permnos)]
+        latest["n_shares"] = latest["permno"].map(shares_input).fillna(0)
+        latest["position"] = latest["n_shares"] * latest["prc"].abs()
+        total_pos = latest["position"].sum()
+        latest["weight"] = (latest["position"] / total_pos * 100).round(1).astype(str) + "%" if total_pos > 0 else "0%"
         holdings = holdings.merge(latest[["permno", "weight"]], on="permno", how="left")
 
     st.dataframe(
@@ -260,24 +318,61 @@ with tab_exposures:
 with tab_rolling:
     st.subheader("Rolling Factor Exposures")
 
-    roll_target = st.radio(
-        "Show rolling betas for:",
-        ["Portfolio"] + [permno_to_ticker.get(p, str(p)) for p in selected_permnos],
-        horizontal=True,
-    )
+    ctrl_col1, ctrl_col2 = st.columns([2, 3])
+    with ctrl_col1:
+        roll_target = st.radio(
+            "Show rolling betas for:",
+            ["Portfolio"] + [permno_to_ticker.get(p, str(p)) for p in selected_permnos],
+            horizontal=True,
+        )
 
     if roll_target == "Portfolio":
         roll_ret = port_ret
     else:
-        # Find permno for selected ticker
         target_permno = [p for p in selected_permnos if permno_to_ticker.get(p, str(p)) == roll_target]
         if target_permno:
             roll_ret = crsp_filtered[crsp_filtered["permno"] == target_permno[0]][["date", "ret"]]
         else:
             roll_ret = pd.DataFrame(columns=["date", "ret"])
 
-    betas = estimate_factor_exposures(roll_ret, ff_filtered, selected_factors, window=window, min_obs=MIN_OBS)
-    fig_roll = plot_rolling_betas(betas, selected_factors)
+    safe_min_obs = max(n_regressors + 1, min(MIN_OBS, window - 1))
+    betas = estimate_factor_exposures(roll_ret, ff_filtered, selected_factors, window=window, min_obs=safe_min_obs)
+
+    # Display range: two-ended date slider anchored to the selected date range
+    roll_min_date = start_date
+    roll_max_date = end_date
+
+    range_key = (roll_min_date, roll_max_date)
+    if st.session_state.get("_roll_disp_key") != range_key:
+        st.session_state["roll_disp_range"] = (roll_min_date, roll_max_date)
+        st.session_state["_roll_disp_key"] = range_key
+    else:
+        lo, hi = st.session_state.get("roll_disp_range", (roll_min_date, roll_max_date))
+        lo = max(lo, roll_min_date)
+        hi = min(hi, roll_max_date)
+        if lo >= hi:
+            lo, hi = roll_min_date, roll_max_date
+        st.session_state["roll_disp_range"] = (lo, hi)
+
+    with ctrl_col2:
+        disp_start, disp_end = st.slider(
+            "Display range",
+            min_value=roll_min_date,
+            max_value=roll_max_date,
+            key="roll_disp_range",
+            format="MMM YYYY",
+        )
+
+    if not betas.empty:
+        betas["date"] = pd.to_datetime(betas["date"])
+        betas_display = betas[
+            (betas["date"] >= pd.Timestamp(disp_start)) &
+            (betas["date"] <= pd.Timestamp(disp_end))
+        ]
+    else:
+        betas_display = betas
+
+    fig_roll = plot_rolling_betas(betas_display, selected_factors)
     st.plotly_chart(fig_roll, use_container_width=True)
 
 

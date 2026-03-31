@@ -75,6 +75,11 @@ def estimate_factor_exposures(returns, factor_returns, selected_factors,
 
     betas = result.params.copy()
     betas["date"] = data["date"].values
+
+    # Rolling idiosyncratic return: actual excess return minus fitted
+    fitted = (result.params * X.values).sum(axis=1)
+    betas["idiosyncratic"] = y.values - fitted
+
     betas = betas.dropna(subset=["const"])
     return betas
 
