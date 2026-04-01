@@ -2,7 +2,7 @@
 
 import pandas as pd
 
-from src.config import UNIVERSE_SIZE
+from src.config import UNIVERSE_SIZE, sic_to_sector
 
 
 def build_universe(crsp, n=UNIVERSE_SIZE):
@@ -28,13 +28,17 @@ def build_universe(crsp, n=UNIVERSE_SIZE):
     )
     monthly.drop(columns=["_rank"], inplace=True)
 
-    # Build ticker map: most recent ticker/name for each permno
+    # Build ticker map: most recent ticker/name/sector for each permno
+    cols = ["permno", "ticker", "comnam"] + (["siccd"] if "siccd" in monthly.columns else [])
     latest = (
         monthly
         .sort_values("date")
         .drop_duplicates(subset=["permno"], keep="last")
-        [["permno", "ticker", "comnam"]]
+        [cols]
         .reset_index(drop=True)
     )
+    if "siccd" in latest.columns:
+        latest["sector"] = latest["siccd"].apply(sic_to_sector)
+        latest = latest.drop(columns=["siccd"])
 
     return universe, latest

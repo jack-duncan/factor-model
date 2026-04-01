@@ -57,7 +57,7 @@ def fetch_crsp_monthly(conn, start_date, end_date):
 
     df = query(conn, f"""
         SELECT m.permno, m.date, m.ret, m.retx, m.prc, m.shrout, m.vol,
-               n.exchcd, n.shrcd, n.ticker, n.comnam
+               n.exchcd, n.shrcd, n.ticker, n.comnam, n.siccd
         FROM crsp.msf m
         LEFT JOIN crsp.msenames n
             ON m.permno = n.permno

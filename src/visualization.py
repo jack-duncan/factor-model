@@ -7,6 +7,35 @@ from plotly.subplots import make_subplots
 
 from src.config import FACTOR_DISPLAY_NAMES
 
+# Shared color palette — solid hex used for pie slices and legend;
+# rgba version (with alpha=0.55) used for stacked area fills.
+_FACTOR_COLORS = {
+    "mktrf":         "#1f77b4",
+    "smb":           "#ff7f0e",
+    "hml":           "#2ca02c",
+    "rmw":           "#d62728",
+    "cma":           "#9467bd",
+    "umd":           "#8c564b",
+    "volatility":    "#e377c2",
+    "liquidity":     "#7f7f7f",
+    "log_size":      "#bcbd22",
+    "leverage":      "#17becf",
+    "growth":        "#aec7e8",
+    "value":         "#ffbb78",
+    "idiosyncratic": "#d62728",  # red — matches pie slice
+}
+_ALPHA = 0.55  # fill transparency for stacked area
+
+
+def _solid(name):
+    return _FACTOR_COLORS.get(name, "#888888")
+
+
+def _rgba(name):
+    h = _solid(name).lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r},{g},{b},{_ALPHA})"
+
 
 def _display(name):
     return FACTOR_DISPLAY_NAMES.get(name, name)
@@ -117,13 +146,17 @@ def plot_factor_attribution(contrib, returns_df, selected_factors):
         fig.add_trace(go.Scatter(
             x=contrib["date"], y=contrib[f],
             name=_display(f), stackgroup="one",
-            mode="lines", line=dict(width=0),
+            mode="lines",
+            line=dict(width=0, color=_rgba(f)),
+            fillcolor=_rgba(f),
         ))
 
     fig.add_trace(go.Scatter(
         x=contrib["date"], y=contrib["alpha"],
         name="Idio", stackgroup="one",
-        mode="lines", line=dict(width=0),
+        mode="lines",
+        line=dict(width=0, color=_rgba("idiosyncratic")),
+        fillcolor=_rgba("idiosyncratic"),
     ))
 
     # Overlay actual excess return
@@ -156,9 +189,11 @@ def plot_risk_decomposition(decomp):
     """
     labels = [_display(k) if k != "idiosyncratic" else "Idio" for k in decomp]
     values = list(decomp.values())
+    colors = [_solid(k) for k in decomp]
 
     fig = go.Figure(data=[go.Pie(
         labels=labels, values=values,
+        marker=dict(colors=colors),
         hole=0.4, textinfo="label+percent",
         textposition="outside",
     )])

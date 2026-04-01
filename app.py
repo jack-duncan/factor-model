@@ -3,6 +3,7 @@
 import logging
 import os
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -70,20 +71,6 @@ def check_data_available(data):
 with st.sidebar:
     st.title("Factor Lens")
 
-    # Refresh data button
-    if st.button("Refresh Data from WRDS", type="secondary"):
-        with st.spinner("Pulling data from WRDS..."):
-            try:
-                from src.data_loader import refresh_data
-                refresh_data()
-                load_data.clear()
-                st.success("Data refreshed!")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Refresh failed: {e}")
-
-    st.divider()
-
     data = load_data()
     data_ok, missing = check_data_available(data)
 
@@ -117,22 +104,61 @@ with st.sidebar:
 
     # Ticker selection
     st.subheader("Portfolio")
-    ticker_options = (
-        ticker_map.dropna(subset=["ticker"])
-        .assign(label=lambda d: d["ticker"] + " — " + d["comnam"].str.title())
-        .sort_values("ticker")
+    _tm = ticker_map.dropna(subset=["ticker"]).copy()
+    _tm["comnam"] = _tm["comnam"].str.title()
+    _dup_tickers = _tm["ticker"].duplicated(keep=False)
+    _tm["label"] = _tm["ticker"] + " — " + _tm["comnam"]
+    _tm.loc[_dup_tickers, "label"] = (
+        _tm.loc[_dup_tickers, "ticker"] + " — " + _tm.loc[_dup_tickers, "comnam"]
+        + " (" + _tm.loc[_dup_tickers, "permno"].astype(str) + ")"
     )
+    ticker_options = _tm.sort_values("ticker")
+
+    # Random portfolio generator
+    rand_col1, rand_col2 = st.columns(2)
+    with rand_col1:
+        rand_n = st.number_input("# of stocks", min_value=1, max_value=20, value=5, step=1)
+    with rand_col2:
+        st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
+        if st.button("Randomize", use_container_width=True):
+            sample_size = min(int(rand_n), len(ticker_options))
+            sampled = ticker_options.sample(n=sample_size, random_state=None)
+            st.session_state["ticker_multiselect"] = sampled["label"].tolist()
+            if st.session_state.get("weight_scheme_radio") == "shares":
+                sampled_permnos = sampled["permno"].tolist()
+                # Get latest price and mcap for each sampled stock
+                latest = (
+                    crsp[crsp["permno"].isin(sampled_permnos)]
+                    .sort_values("date")
+                    .drop_duplicates("permno", keep="last")
+                    .set_index("permno")[["prc", "mcap"]]
+                )
+                latest["prc"] = latest["prc"].abs()
+                # Largest mcap stock anchors at mean=10 shares
+                anchor = latest["mcap"].idxmax()
+                ref_position = 10 * latest.loc[anchor, "prc"]
+                for p in sampled_permnos:
+                    if p in latest.index and latest.loc[p, "prc"] > 0:
+                        mean_shares = ref_position / latest.loc[p, "prc"]
+                    else:
+                        mean_shares = 10.0
+                    std = max(1.0, mean_shares * 0.2)
+                    shares = max(1, int(np.round(np.random.normal(mean_shares, std))))
+                    st.session_state[f"shares_{p}"] = float(shares)
+
     selected_labels = st.multiselect(
         "Search tickers",
         options=ticker_options["label"].tolist(),
         default=[],
         placeholder="Type to search...",
         max_selections=20,
+        key="ticker_multiselect",
     )
     # Map labels back to permnos
     selected_permnos = ticker_options[ticker_options["label"].isin(selected_labels)]["permno"].tolist()
 
-    weight_scheme = st.radio("Weighting", ["equal", "mcap", "shares"], horizontal=True)
+    weight_scheme = st.radio("Weighting", ["equal", "mcap", "shares"], horizontal=True,
+                             key="weight_scheme_radio")
 
     # Shares input — one number field per selected ticker
     shares_input = {}
@@ -142,7 +168,7 @@ with st.sidebar:
         for p in selected_permnos:
             label = permno_to_label.get(p, str(p))
             shares_input[p] = st.number_input(
-                label, min_value=0, value=100, step=1, key=f"shares_{p}"
+                label, value=100.0, step=1.0, format="%.3f", key=f"shares_{p}"
             )
 
     st.divider()
@@ -180,6 +206,19 @@ with st.sidebar:
     window = st.slider("Estimation window (months)", min_value=win_min, max_value=win_max,
                        step=1, key="window_slider")
 
+    st.divider()
+
+    # Refresh data button — bottom of sidebar
+    if st.button("Refresh Data from WRDS", type="secondary", use_container_width=True):
+        with st.spinner("Pulling data from WRDS..."):
+            try:
+                from src.data_loader import refresh_data
+                refresh_data()
+                load_data.clear()
+                st.success("Data refreshed!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Refresh failed: {e}")
 
 
 # ── Filter data to date range ───────────────────────────────────────────────
@@ -265,10 +304,13 @@ with tab_holdings:
         latest["weight"] = (latest["position"] / total_pos * 100).round(1).astype(str) + "%" if total_pos > 0 else "0%"
         holdings = holdings.merge(latest[["permno", "weight"]], on="permno", how="left")
 
+    display_cols = {"ticker": "Ticker", "comnam": "Company", "sector": "Sector", "weight": "Weight"}
+    if "sector" in holdings.columns:
+        show_cols = ["ticker", "comnam", "sector", "weight"]
+    else:
+        show_cols = ["ticker", "comnam", "weight"]
     st.dataframe(
-        holdings[["ticker", "comnam", "weight"]].rename(
-            columns={"ticker": "Ticker", "comnam": "Company", "weight": "Weight"}
-        ),
+        holdings[show_cols].rename(columns=display_cols),
         use_container_width=True,
         hide_index=True,
     )
