@@ -119,18 +119,33 @@ def factor_attribution(result, factor_returns, selected_factors):
 def variance_decomposition(result, factor_returns, selected_factors):
     """Compute fraction of return variance explained by each factor.
 
+    Idiosyncratic fraction = 1 - R² (exact by construction).
+    Factor fractions are allocated proportionally by each factor's diagonal
+    variance contribution (β_i² · σ_i²), scaled so they sum to R².
+    Cross-factor covariance terms are distributed implicitly via this scaling.
+
     Returns dict: {factor_name: fraction, 'idiosyncratic': fraction}.
     """
     ff = factor_returns[selected_factors].dropna()
     cov = ff.cov()
 
     betas = np.array([result.params.get(f, 0) for f in selected_factors])
-    total_var = result.mse_total * result.nobs / (result.nobs - 1)
+
+    # Idiosyncratic = 1 - R² (exact: RSS/TSS = 1 - R²)
+    idio_fraction = max(1.0 - result.rsquared, 0.0)
+    factor_fraction = result.rsquared
+
+    # Allocate factor_fraction proportionally by diagonal variance (β_i² · Var(F_i))
+    diag_contribs = np.array([betas[i] ** 2 * cov.iloc[i, i] for i in range(len(selected_factors))])
+    diag_total = diag_contribs.sum()
 
     decomp = {}
-    for i, f in enumerate(selected_factors):
-        var_contrib = betas[i] ** 2 * cov.iloc[i, i]
-        decomp[f] = max(var_contrib / total_var, 0)
+    if diag_total > 0:
+        for i, f in enumerate(selected_factors):
+            decomp[f] = max(diag_contribs[i] / diag_total * factor_fraction, 0.0)
+    else:
+        for f in selected_factors:
+            decomp[f] = 0.0
 
-    decomp["idiosyncratic"] = max(1 - sum(decomp.values()), 0)
+    decomp["idiosyncratic"] = idio_fraction
     return decomp

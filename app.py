@@ -23,7 +23,7 @@ from src.factor_model import (
     full_sample_regression,
     variance_decomposition,
 )
-from src.portfolio import portfolio_returns, stock_factor_exposures
+from src.portfolio import optimize_beta_neutral, portfolio_returns, stock_factor_exposures
 from src.visualization import (
     plot_exposure_heatmap,
     plot_factor_attribution,
@@ -124,9 +124,9 @@ with st.sidebar:
             sample_size = min(int(rand_n), len(ticker_options))
             sampled = ticker_options.sample(n=sample_size, random_state=None)
             st.session_state["ticker_multiselect"] = sampled["label"].tolist()
-            if st.session_state.get("weight_scheme_radio") == "shares":
+            scheme = st.session_state.get("weight_scheme_radio")
+            if scheme == "shares":
                 sampled_permnos = sampled["permno"].tolist()
-                # Get latest price and mcap for each sampled stock
                 latest = (
                     crsp[crsp["permno"].isin(sampled_permnos)]
                     .sort_values("date")
@@ -134,7 +134,6 @@ with st.sidebar:
                     .set_index("permno")[["prc", "mcap"]]
                 )
                 latest["prc"] = latest["prc"].abs()
-                # Largest mcap stock anchors at mean=10 shares
                 anchor = latest["mcap"].idxmax()
                 ref_position = 10 * latest.loc[anchor, "prc"]
                 for p in sampled_permnos:
@@ -145,6 +144,10 @@ with st.sidebar:
                     std = max(1.0, mean_shares * 0.2)
                     shares = max(1, int(np.round(np.random.normal(mean_shares, std))))
                     st.session_state[f"shares_{p}"] = float(shares)
+            elif scheme == "dollar":
+                for p in sampled["permno"].tolist():
+                    amt = max(1.0, round(np.random.normal(100.0, 30.0), 2))
+                    st.session_state[f"dollar_{p}"] = amt
 
     selected_labels = st.multiselect(
         "Search tickers",
@@ -157,18 +160,26 @@ with st.sidebar:
     # Map labels back to permnos
     selected_permnos = ticker_options[ticker_options["label"].isin(selected_labels)]["permno"].tolist()
 
-    weight_scheme = st.radio("Weighting", ["equal", "mcap", "shares"], horizontal=True,
+    weight_scheme = st.radio("Weighting", ["equal", "mcap", "shares", "dollar"], horizontal=True,
                              key="weight_scheme_radio")
 
     # Shares input — one number field per selected ticker
     shares_input = {}
+    dollar_input = {}
+    permno_to_label = dict(zip(ticker_options["permno"], ticker_options["ticker"]))
     if weight_scheme == "shares" and selected_permnos:
-        st.caption("Enter number of shares held:")
-        permno_to_label = dict(zip(ticker_options["permno"], ticker_options["ticker"]))
+        st.caption("Enter number of shares (negative = short):")
         for p in selected_permnos:
             label = permno_to_label.get(p, str(p))
             shares_input[p] = st.number_input(
                 label, value=100.0, step=1.0, format="%.3f", key=f"shares_{p}"
+            )
+    elif weight_scheme == "dollar" and selected_permnos:
+        st.caption("Enter dollar amount (negative = short):")
+        for p in selected_permnos:
+            label = permno_to_label.get(p, str(p))
+            dollar_input[p] = st.number_input(
+                label, value=100.0, step=1.0, format="%.2f", key=f"dollar_{p}"
             )
 
     st.divider()
@@ -241,14 +252,20 @@ if not selected_factors:
     st.stop()
 
 # Compute portfolio returns
-port_ret = portfolio_returns(selected_permnos, crsp_filtered, weight_scheme,
-                             shares=shares_input if weight_scheme == "shares" else None)
+port_ret = portfolio_returns(
+    selected_permnos, crsp_filtered, weight_scheme,
+    shares=shares_input if weight_scheme == "shares" else None,
+    dollars=dollar_input if weight_scheme == "dollar" else None,
+)
 
 # Per-stock regressions
 stock_results = stock_factor_exposures(selected_permnos, crsp_filtered, ff_filtered, selected_factors)
 
 # Portfolio regression
 port_result = full_sample_regression(port_ret, ff_filtered, selected_factors)
+
+# Beta-neutral optimization — always run for current portfolio
+opt_weights = optimize_beta_neutral(stock_results, selected_permnos)
 
 # Build labels
 permno_to_ticker = dict(zip(ticker_map["permno"], ticker_map["ticker"]))
@@ -284,48 +301,159 @@ with tab_holdings:
     holdings["ticker"] = holdings["ticker"].fillna("N/A")
     holdings["comnam"] = holdings["comnam"].str.title()
 
+    # Get latest price for each selected stock
+    latest_month = crsp_filtered.groupby("permno")["date"].max().reset_index()
+    latest_prices = crsp_filtered.merge(latest_month, on=["permno", "date"])
+    latest_prices = latest_prices[latest_prices["permno"].isin(selected_permnos)][["permno", "prc", "mcap"]].copy()
+    latest_prices["price"] = latest_prices["prc"].abs()
+
     n = len(holdings)
     if weight_scheme == "equal":
         holdings["weight"] = f"{100/n:.1f}%" if n > 0 else "0%"
+        holdings = holdings.merge(latest_prices[["permno", "price"]], on="permno", how="left")
+        holdings["n_shares"] = "-"
+        holdings["balance"] = "-"
+        total_value = None
     elif weight_scheme == "mcap":
-        latest_month = crsp_filtered.groupby("permno")["date"].max().reset_index()
-        latest = crsp_filtered.merge(latest_month, on=["permno", "date"])
-        latest = latest[latest["permno"].isin(selected_permnos)]
-        total_mcap = latest["mcap"].sum()
-        latest["weight"] = (latest["mcap"] / total_mcap * 100).round(1).astype(str) + "%"
-        holdings = holdings.merge(latest[["permno", "weight"]], on="permno", how="left")
-    else:  # shares
-        latest_month = crsp_filtered.groupby("permno")["date"].max().reset_index()
-        latest = crsp_filtered.merge(latest_month, on=["permno", "date"])
-        latest = latest[latest["permno"].isin(selected_permnos)]
-        latest["n_shares"] = latest["permno"].map(shares_input).fillna(0)
-        latest["position"] = latest["n_shares"] * latest["prc"].abs()
-        total_pos = latest["position"].sum()
-        latest["weight"] = (latest["position"] / total_pos * 100).round(1).astype(str) + "%" if total_pos > 0 else "0%"
-        holdings = holdings.merge(latest[["permno", "weight"]], on="permno", how="left")
+        total_mcap = latest_prices["mcap"].sum()
+        latest_prices["weight"] = (latest_prices["mcap"] / total_mcap * 100).round(1).astype(str) + "%"
+        holdings = holdings.merge(latest_prices[["permno", "weight", "price"]], on="permno", how="left")
+        holdings["n_shares"] = "-"
+        holdings["balance"] = "-"
+        total_value = None
+    elif weight_scheme == "shares":
+        latest_prices["n_shares"] = latest_prices["permno"].map(shares_input).fillna(0)
+        latest_prices["position"] = latest_prices["n_shares"] * latest_prices["price"]  # signed
+        gross_exposure = latest_prices["position"].abs().sum()
+        net_exposure = latest_prices["position"].sum()
+        if gross_exposure > 0:
+            latest_prices["weight"] = (latest_prices["position"] / gross_exposure * 100).round(1).astype(str) + "%"
+        else:
+            latest_prices["weight"] = "0%"
+        latest_prices["balance_val"] = latest_prices["position"]
+        holdings = holdings.merge(latest_prices[["permno", "weight", "price", "n_shares", "balance_val"]], on="permno", how="left")
+        holdings["n_shares"] = holdings["n_shares"].apply(lambda x: f"{int(x):,}" if x != "-" and not (isinstance(x, float) and x != x) else "-")
+        holdings["balance"] = holdings["balance_val"].apply(lambda x: f"${x:,.2f}" if x != "-" and not (isinstance(x, float) and x != x) else "-")
+        holdings = holdings.drop(columns=["balance_val"])
+        total_value = (gross_exposure, net_exposure)
+    else:  # dollar
+        latest_prices["dollar_pos"] = latest_prices["permno"].map(dollar_input).fillna(0)
+        gross_exposure = latest_prices["dollar_pos"].abs().sum()
+        net_exposure = latest_prices["dollar_pos"].sum()
+        if gross_exposure > 0:
+            latest_prices["weight"] = (latest_prices["dollar_pos"] / gross_exposure * 100).round(1).astype(str) + "%"
+        else:
+            latest_prices["weight"] = "0%"
+        # Derive implied shares from dollar amount / price
+        latest_prices["n_shares_implied"] = latest_prices.apply(
+            lambda r: r["dollar_pos"] / r["price"] if r["price"] > 0 else 0, axis=1
+        )
+        holdings = holdings.merge(latest_prices[["permno", "weight", "price", "dollar_pos", "n_shares_implied"]], on="permno", how="left")
+        holdings["n_shares"] = holdings["n_shares_implied"].apply(lambda x: f"{x:,.2f}" if not (isinstance(x, float) and x != x) else "-")
+        holdings["balance"] = holdings["dollar_pos"].apply(lambda x: f"${x:,.2f}" if not (isinstance(x, float) and x != x) else "-")
+        holdings = holdings.drop(columns=["dollar_pos", "n_shares_implied"])
+        total_value = (gross_exposure, net_exposure)
 
-    display_cols = {"ticker": "Ticker", "comnam": "Company", "sector": "Sector", "weight": "Weight"}
+    holdings["price"] = holdings["price"].apply(lambda x: f"${x:,.2f}" if not (isinstance(x, float) and x != x) else "-")
+
+    display_cols = {
+        "ticker": "Ticker", "comnam": "Company", "sector": "Sector",
+        "weight": "Weight", "price": "Share Price", "n_shares": "# Shares", "balance": "Balance",
+    }
+    base_cols = ["ticker", "comnam"]
     if "sector" in holdings.columns:
-        show_cols = ["ticker", "comnam", "sector", "weight"]
-    else:
-        show_cols = ["ticker", "comnam", "weight"]
+        base_cols.append("sector")
+    base_cols += ["weight", "price", "n_shares", "balance"]
+    show_cols = [c for c in base_cols if c in holdings.columns]
+
     st.dataframe(
         holdings[show_cols].rename(columns=display_cols),
         use_container_width=True,
         hide_index=True,
     )
 
+    # ── Current portfolio metrics ─────────────────────────────────────────────
     if port_ret is not None and not port_ret.empty:
         cum_ret = (1 + port_ret["ret"]).cumprod() - 1
+        final_cum = cum_ret.iloc[-1]
         col1, col2, col3 = st.columns(3)
+
         with col1:
-            st.metric("Cumulative Return", f"{cum_ret.iloc[-1]:.1%}")
+            if total_value is not None:
+                gross, _ = total_value
+                st.metric("Gross Exposure", f"${gross:,.2f}")
+            st.metric("Cumulative Return", f"{final_cum:.1%}")
+
         with col2:
-            ann_ret = (1 + cum_ret.iloc[-1]) ** (12 / len(port_ret)) - 1
-            st.metric("Annualized Return", f"{ann_ret:.1%}")
+            if total_value is not None:
+                _, net = total_value
+                st.metric("Net Exposure", f"${net:,.2f}")
+            if final_cum > -1:
+                ann_ret = (1 + final_cum) ** (12 / len(port_ret)) - 1
+                st.metric("Annualized Return", f"{ann_ret:.1%}")
+            else:
+                st.metric("Annualized Return", "N/A")
+
         with col3:
             ann_vol = port_ret["ret"].std() * (12 ** 0.5)
             st.metric("Annualized Volatility", f"{ann_vol:.1%}")
+
+    # ── Beta-neutral optimized weights ────────────────────────────────────────
+    if opt_weights is not None:
+        st.subheader("Beta-Neutral Optimized Weights")
+        st.caption("Treynor-Black: maximizes α/σ²ₑ subject to β_mkt = 0. Net exposure unconstrained.")
+
+        opt_rows = []
+        for p in selected_permnos:
+            res = stock_results.get(p)
+            ticker = permno_to_ticker.get(p, str(p))
+            w_opt = opt_weights.get(p, 0.0)
+            alpha = res.params.get("const", float("nan")) if res else float("nan")
+            beta_mkt = res.params.get("mktrf", float("nan")) if res else float("nan")
+            opt_rows.append({
+                "Ticker": ticker,
+                "Opt Weight": f"{w_opt:+.1%}",
+                "Direction": "Long" if w_opt > 0 else "Short",
+                "Alpha (monthly)": f"{alpha:.4f}" if res else "—",
+                "MKT-RF β": f"{beta_mkt:.3f}" if res else "—",
+            })
+        opt_df = pd.DataFrame(opt_rows).sort_values("Opt Weight", ascending=False)
+        st.dataframe(opt_df, use_container_width=True, hide_index=True)
+
+        # ── Optimized portfolio return metrics ────────────────────────────────
+        df_opt = crsp_filtered[crsp_filtered["permno"].isin(selected_permnos)].copy()
+        df_opt["w"] = df_opt["permno"].map(opt_weights).fillna(0)
+        opt_port_ret = (
+            df_opt.groupby("date")
+            .apply(lambda g: (g["w"] * g["ret"]).sum(), include_groups=False)
+            .reset_index()
+        )
+        opt_port_ret.columns = ["date", "ret"]
+        opt_port_ret = opt_port_ret.sort_values("date")
+
+        if not opt_port_ret.empty:
+            opt_cum = (1 + opt_port_ret["ret"]).cumprod() - 1
+            opt_final = opt_cum.iloc[-1]
+            opt_beta = sum(
+                opt_weights.get(p, 0) * (stock_results[p].params.get("mktrf", 0) if stock_results.get(p) else 0)
+                for p in selected_permnos
+            )
+
+            oc1, oc2, oc3 = st.columns(3)
+            with oc1:
+                st.metric("Portfolio β", f"{opt_beta:.4f}")
+                st.metric("Cumulative Return", f"{opt_final:.1%}")
+            with oc2:
+                opt_net = sum(opt_weights.get(p, 0) for p in selected_permnos)
+                st.metric("Net Exposure (normalized)", f"{opt_net:+.1%}")
+                if opt_final > -1:
+                    opt_ann = (1 + opt_final) ** (12 / len(opt_port_ret)) - 1
+                    st.metric("Annualized Return", f"{opt_ann:.1%}")
+                else:
+                    st.metric("Annualized Return", "N/A")
+            with oc3:
+                opt_vol = opt_port_ret["ret"].std() * (12 ** 0.5)
+                st.metric("Annualized Volatility", f"{opt_vol:.1%}")
 
 
 # ── Tab 2: Factor Exposures ─────────────────────────────────────────────────

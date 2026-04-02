@@ -1,18 +1,20 @@
 # Factor Lens
 
-Interactive Fama-French factor model dashboard for US equities, built with Streamlit. Construct portfolios from a top-3000 market-cap universe (2015–2024) and analyze factor exposures, rolling betas, return attribution, and variance decomposition.
+Interactive Fama-French factor model dashboard for US equities, built with Streamlit. Construct portfolios from a top-3000 market-cap universe (2015–present) and analyze factor exposures, rolling betas, return attribution, variance decomposition, and beta-neutral optimization.
 
 ## Features
 
-- **Portfolio builder** — search and select tickers (up to 20) from the top-3000 universe; equal, market-cap, or custom shares weighting (long or short)
-- **Random portfolio generator** — generate a random portfolio of n stocks; shares mode assigns equal-dollar-value positions anchored to the largest-mcap stock at 10 shares
+- **Portfolio builder** — search and select tickers (up to 20) from the top-3000 universe; equal, market-cap, shares, or dollar-amount weighting (long or short)
+- **Random portfolio generator** — generate a random portfolio of n stocks; shares mode anchors equal-dollar positions to the largest-mcap stock at 10 shares; dollar mode draws from N(μ=$100, σ=$30)
+- **Long-short support** — negative shares or dollar amounts treated as short positions; gross/net exposure displayed separately
 - **Sector classification** — SIC-based broad sector shown in holdings table (Tech, Finance, Manufacturing, etc.)
 - **Factor model equation** — fitted OLS equation with coefficients displayed above the tabs
 - **Factor exposures** — beta heatmap across all selected stocks and the portfolio, with significance stars and R²
-- **Rolling exposures** — time-varying betas via RollingOLS; estimation window in sidebar, two-ended display range slider in tab
+- **Rolling exposures** — time-varying betas via RollingOLS; estimation window in sidebar, two-ended display range slider in tab; includes idiosyncratic return series
 - **Return attribution** — stacked area chart decomposing returns into factor contributions + idiosyncratic residual; consistent colors with variance decomposition
-- **Variance decomposition** — donut chart showing how much return variance each factor explains
+- **Variance decomposition** — donut chart showing how much return variance each factor explains (idio = 1 − R², exact)
 - **Factor correlation** — correlation matrix across all active factors
+- **Beta-neutral optimizer** — Treynor-Black optimization that finds market-neutral weights maximizing α/σ²ₑ; runs automatically for every portfolio and shows optimized return metrics alongside current portfolio metrics
 
 ## Factor Model
 
@@ -66,8 +68,8 @@ On first launch, click **Refresh Data from WRDS** at the bottom of the sidebar t
 |---------|----------|--------|
 | Date range | Sidebar | Filters all data; bounds regression and charts |
 | Ticker search | Sidebar | Add up to 20 stocks to the portfolio |
-| Random generator | Sidebar | Generate n random stocks with auto-calculated share counts |
-| Weighting | Sidebar | Equal / market-cap / shares (long or short) |
+| Random generator | Sidebar | Generate n random stocks with auto-calculated position sizes |
+| Weighting | Sidebar | Equal / market-cap / shares / dollar-amount (all support short positions) |
 | Factor toggles | Sidebar | Include/exclude factors from all regressions |
 | Estimation window | Sidebar | Months of data used per rolling OLS estimate |
 | Refresh Data | Sidebar (bottom) | Pull new data from WRDS incrementally |
@@ -82,9 +84,10 @@ src/
   universe.py       — top-3000 market-cap universe construction with sector labels
   factors.py        — quintile long-short factor return construction (disabled)
   factor_model.py   — OLS, RollingOLS, attribution, variance decomposition
-  portfolio.py      — portfolio returns and per-stock regressions
+  portfolio.py      — portfolio returns, per-stock regressions, beta-neutral optimizer
   visualization.py  — Plotly chart builders with consistent color palette
 app.py              — Streamlit dashboard
+MATH.md             — mathematical reference for all models and formulas
 notebooks/          — exploratory analysis (not production code)
 data/
   raw/              — cached CRSP, FF parquet files (gitignored)
