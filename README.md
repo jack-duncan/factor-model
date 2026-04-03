@@ -14,7 +14,7 @@ Interactive Fama-French factor model dashboard for US equities, built with Strea
 - **Return attribution** — stacked area chart decomposing returns into factor contributions + idiosyncratic residual; consistent colors with variance decomposition
 - **Variance decomposition** — donut chart showing how much return variance each factor explains (idio = 1 − R², exact)
 - **Factor correlation** — correlation matrix across all active factors
-- **Beta-neutral optimizer** — Treynor-Black QP anchored to current portfolio weights: maximizes α/σ²ₑ subject to β_mkt = 0; optimized weight shown as a column in the holdings table alongside current weight, with return metrics below
+- **Beta-neutral optimizer** — Treynor-Black LP (HiGHS solver): maximizes α/σ²ₑ subject to β_mkt = 0; globally optimal by construction; zero weights are meaningful (stock adds no alpha given the beta constraint); optimized weight shown as a column in the holdings table with return metrics below
 
 ## Factor Model
 

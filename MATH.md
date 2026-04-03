@@ -245,25 +245,17 @@ The **appraisal ratio** $\hat{\alpha}_i / \hat{\sigma}_{\varepsilon,i}$ measures
 
 ### 6.4 Solution method
 
-The objective includes a small L2 ridge term to prevent degenerate all-zero solutions:
+This is solved as a **Linear Program** via the HiGHS solver (`scipy.optimize.linprog`):
 
-$$\max_{w} \quad \sum_i \frac{\hat{\alpha}_i}{\hat{\sigma}^2_{\varepsilon,i}} w_i - \lambda \| w - w_0 \|^2$$
+$$\max_{w} \quad \sum_i \frac{\hat{\alpha}_i}{\hat{\sigma}^2_{\varepsilon,i}} w_i \qquad \text{subject to} \quad \boldsymbol{\beta}^\top w = 0, \quad w_i \in [-1, 1]$$
 
-where $w_0$ is the current portfolio weights (normalized) and $\lambda = 0.1 \times \max_i |\text{score}_i|$.
+**Global optimality is guaranteed.** The feasible set (a hyperplane intersected with a box) is convex. The LP optimum is at a vertex of this polytope — HiGHS finds it exactly.
 
-The ridge term does two things:
-1. **Prevents zeros** — a pure LP with one equality constraint pushes all but one variable to a bound (±1) or zero; the ridge forces a graded, spread solution
-2. **Anchors to current portfolio** — the optimizer finds the nearest beta-neutral adjustment rather than an abstract solution, making results actionable
+**Why many weights are zero or ±1.** An LP vertex has at most $m$ non-basic variables not at their bounds, where $m$ is the number of equality constraints. With $m = 1$ (beta-neutrality), all but at most one stock will be at a bound (long at +1, short at −1) or zero. This is not a numerical artifact — it is the mathematically correct solution. Zero weights mean that stock does not improve the objective given the beta constraint.
 
-This is solved as a **quadratic program** via SLSQP. The warm start projects the current weights onto the beta-neutral subspace:
+**Why zeros are meaningful.** A stock gets $w_i = 0$ when its appraisal-adjusted score does not justify a position once the beta constraint is satisfied. Adding it at any non-zero weight either reduces expected alpha or violates beta-neutrality.
 
-$$w_{\text{init}} = w_0 - \frac{\boldsymbol{\beta}^\top w_0}{\boldsymbol{\beta}^\top \boldsymbol{\beta}} \cdot \boldsymbol{\beta}$$
-
-The gradient of the full objective is:
-
-$$\nabla_w = \text{scores} - 2\lambda(w - w_0)$$
-
-With only one equality constraint (beta-neutrality), net exposure is unconstrained — the optimizer tilts net long or short wherever the alpha opportunity is greatest.
+With only one equality constraint, net exposure $\sum_i w_i$ is unconstrained — the optimizer tilts net long or short wherever the alpha opportunity is greatest.
 
 ### 6.5 Interpretation of results
 
