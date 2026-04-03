@@ -121,14 +121,18 @@ with st.sidebar:
     with rand_col2:
         st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
         if st.button("Randomize", use_container_width=True):
-            sample_size = min(int(rand_n), len(ticker_options))
-            sampled = ticker_options.sample(n=sample_size, random_state=None)
+            # Only sample from stocks that have price data in the selected date range
+            _mask = (crsp["date"] >= pd.Timestamp(start_date)) & (crsp["date"] <= pd.Timestamp(end_date))
+            permnos_in_range = set(crsp.loc[_mask, "permno"].unique())
+            ticker_options_in_range = ticker_options[ticker_options["permno"].isin(permnos_in_range)]
+            sample_size = min(int(rand_n), len(ticker_options_in_range))
+            sampled = ticker_options_in_range.sample(n=sample_size, random_state=None)
             st.session_state["ticker_multiselect"] = sampled["label"].tolist()
             scheme = st.session_state.get("weight_scheme_radio")
             if scheme == "shares":
                 sampled_permnos = sampled["permno"].tolist()
                 latest = (
-                    crsp[crsp["permno"].isin(sampled_permnos)]
+                    crsp_filtered[crsp_filtered["permno"].isin(sampled_permnos)]
                     .sort_values("date")
                     .drop_duplicates("permno", keep="last")
                     .set_index("permno")[["prc", "mcap"]]
@@ -264,8 +268,33 @@ stock_results = stock_factor_exposures(selected_permnos, crsp_filtered, ff_filte
 # Portfolio regression
 port_result = full_sample_regression(port_ret, ff_filtered, selected_factors)
 
+# Compute numeric current weights for optimizer warm start
+_lm = crsp_filtered.groupby("permno")["date"].max().reset_index()
+_lp = crsp_filtered.merge(_lm, on=["permno", "date"])
+_lp = _lp[_lp["permno"].isin(selected_permnos)][["permno", "prc", "mcap"]].copy()
+_lp["price"] = _lp["prc"].abs()
+_n = len(selected_permnos)
+current_weights_numeric = {}
+if weight_scheme == "equal" and _n > 0:
+    current_weights_numeric = {p: 1.0 / _n for p in selected_permnos}
+elif weight_scheme == "mcap":
+    _total_mcap = _lp["mcap"].sum()
+    if _total_mcap > 0:
+        current_weights_numeric = dict(zip(_lp["permno"], _lp["mcap"] / _total_mcap))
+elif weight_scheme == "shares":
+    _lp["pos"] = _lp["permno"].map(shares_input).fillna(0) * _lp["price"]
+    _gross = _lp["pos"].abs().sum()
+    if _gross > 0:
+        current_weights_numeric = dict(zip(_lp["permno"], _lp["pos"] / _gross))
+elif weight_scheme == "dollar":
+    _lp["pos"] = _lp["permno"].map(dollar_input).fillna(0)
+    _gross = _lp["pos"].abs().sum()
+    if _gross > 0:
+        current_weights_numeric = dict(zip(_lp["permno"], _lp["pos"] / _gross))
+
 # Beta-neutral optimization — always run for current portfolio
-opt_weights = optimize_beta_neutral(stock_results, selected_permnos)
+opt_weights = optimize_beta_neutral(stock_results, selected_permnos,
+                                    current_weights=current_weights_numeric or None)
 
 # Build labels
 permno_to_ticker = dict(zip(ticker_map["permno"], ticker_map["ticker"]))
@@ -356,14 +385,21 @@ with tab_holdings:
 
     holdings["price"] = holdings["price"].apply(lambda x: f"${x:,.2f}" if not (isinstance(x, float) and x != x) else "-")
 
+    # Add optimized weight column directly to holdings table
+    if opt_weights is not None:
+        holdings["opt_weight"] = holdings["permno"].map(
+            lambda p: f"{opt_weights.get(p, 0.0):+.1%}"
+        )
+
     display_cols = {
         "ticker": "Ticker", "comnam": "Company", "sector": "Sector",
-        "weight": "Weight", "price": "Share Price", "n_shares": "# Shares", "balance": "Balance",
+        "weight": "Weight", "opt_weight": "Opt Weight",
+        "price": "Share Price", "n_shares": "# Shares", "balance": "Balance",
     }
     base_cols = ["ticker", "comnam"]
     if "sector" in holdings.columns:
         base_cols.append("sector")
-    base_cols += ["weight", "price", "n_shares", "balance"]
+    base_cols += ["weight", "opt_weight", "price", "n_shares", "balance"]
     show_cols = [c for c in base_cols if c in holdings.columns]
 
     st.dataframe(
@@ -398,29 +434,9 @@ with tab_holdings:
             ann_vol = port_ret["ret"].std() * (12 ** 0.5)
             st.metric("Annualized Volatility", f"{ann_vol:.1%}")
 
-    # ── Beta-neutral optimized weights ────────────────────────────────────────
+    # ── Optimized portfolio metrics ───────────────────────────────────────────
     if opt_weights is not None:
-        st.subheader("Beta-Neutral Optimized Weights")
-        st.caption("Treynor-Black: maximizes α/σ²ₑ subject to β_mkt = 0. Net exposure unconstrained.")
-
-        opt_rows = []
-        for p in selected_permnos:
-            res = stock_results.get(p)
-            ticker = permno_to_ticker.get(p, str(p))
-            w_opt = opt_weights.get(p, 0.0)
-            alpha = res.params.get("const", float("nan")) if res else float("nan")
-            beta_mkt = res.params.get("mktrf", float("nan")) if res else float("nan")
-            opt_rows.append({
-                "Ticker": ticker,
-                "Opt Weight": f"{w_opt:+.1%}",
-                "Direction": "Long" if w_opt > 0 else "Short",
-                "Alpha (monthly)": f"{alpha:.4f}" if res else "—",
-                "MKT-RF β": f"{beta_mkt:.3f}" if res else "—",
-            })
-        opt_df = pd.DataFrame(opt_rows).sort_values("Opt Weight", ascending=False)
-        st.dataframe(opt_df, use_container_width=True, hide_index=True)
-
-        # ── Optimized portfolio return metrics ────────────────────────────────
+        st.caption("Treynor-Black: maximizes α/σ²ₑ anchored to current weights, β_mkt = 0.")
         df_opt = crsp_filtered[crsp_filtered["permno"].isin(selected_permnos)].copy()
         df_opt["w"] = df_opt["permno"].map(opt_weights).fillna(0)
         opt_port_ret = (
@@ -438,22 +454,22 @@ with tab_holdings:
                 opt_weights.get(p, 0) * (stock_results[p].params.get("mktrf", 0) if stock_results.get(p) else 0)
                 for p in selected_permnos
             )
+            opt_net = sum(opt_weights.get(p, 0) for p in selected_permnos)
 
             oc1, oc2, oc3 = st.columns(3)
             with oc1:
-                st.metric("Portfolio β", f"{opt_beta:.4f}")
-                st.metric("Cumulative Return", f"{opt_final:.1%}")
+                st.metric("Portfolio β (opt)", f"{opt_beta:.4f}")
+                st.metric("Cumulative Return (opt)", f"{opt_final:.1%}")
             with oc2:
-                opt_net = sum(opt_weights.get(p, 0) for p in selected_permnos)
-                st.metric("Net Exposure (normalized)", f"{opt_net:+.1%}")
+                st.metric("Net Exposure (opt)", f"{opt_net:+.1%}")
                 if opt_final > -1:
                     opt_ann = (1 + opt_final) ** (12 / len(opt_port_ret)) - 1
-                    st.metric("Annualized Return", f"{opt_ann:.1%}")
+                    st.metric("Annualized Return (opt)", f"{opt_ann:.1%}")
                 else:
-                    st.metric("Annualized Return", "N/A")
+                    st.metric("Annualized Return (opt)", "N/A")
             with oc3:
                 opt_vol = opt_port_ret["ret"].std() * (12 ** 0.5)
-                st.metric("Annualized Volatility", f"{opt_vol:.1%}")
+                st.metric("Annualized Volatility (opt)", f"{opt_vol:.1%}")
 
 
 # ── Tab 2: Factor Exposures ─────────────────────────────────────────────────

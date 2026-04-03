@@ -5,7 +5,7 @@ Interactive Fama-French factor model dashboard for US equities, built with Strea
 ## Features
 
 - **Portfolio builder** — search and select tickers (up to 20) from the top-3000 universe; equal, market-cap, shares, or dollar-amount weighting (long or short)
-- **Random portfolio generator** — generate a random portfolio of n stocks; shares mode anchors equal-dollar positions to the largest-mcap stock at 10 shares; dollar mode draws from N(μ=$100, σ=$30)
+- **Random portfolio generator** — generate a random portfolio of n stocks restricted to tickers with data in the selected date range; shares mode anchors equal-dollar positions to the largest-mcap stock at 10 shares; dollar mode draws from N(μ=$100, σ=$30)
 - **Long-short support** — negative shares or dollar amounts treated as short positions; gross/net exposure displayed separately
 - **Sector classification** — SIC-based broad sector shown in holdings table (Tech, Finance, Manufacturing, etc.)
 - **Factor model equation** — fitted OLS equation with coefficients displayed above the tabs
@@ -14,7 +14,7 @@ Interactive Fama-French factor model dashboard for US equities, built with Strea
 - **Return attribution** — stacked area chart decomposing returns into factor contributions + idiosyncratic residual; consistent colors with variance decomposition
 - **Variance decomposition** — donut chart showing how much return variance each factor explains (idio = 1 − R², exact)
 - **Factor correlation** — correlation matrix across all active factors
-- **Beta-neutral optimizer** — Treynor-Black optimization that finds market-neutral weights maximizing α/σ²ₑ; runs automatically for every portfolio and shows optimized return metrics alongside current portfolio metrics
+- **Beta-neutral optimizer** — Treynor-Black QP anchored to current portfolio weights: maximizes α/σ²ₑ subject to β_mkt = 0; optimized weight shown as a column in the holdings table alongside current weight, with return metrics below
 
 ## Factor Model
 

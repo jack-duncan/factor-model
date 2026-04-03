@@ -73,19 +73,28 @@ def portfolio_returns(permnos, crsp, weight_scheme="equal", shares=None, dollars
     return port.sort_values("date").reset_index(drop=True)
 
 
-def optimize_beta_neutral(stock_results, selected_permnos):
-    """Find beta-neutral, alpha-maximizing weights (Treynor-Black).
+def optimize_beta_neutral(stock_results, selected_permnos, current_weights=None):
+    """Find beta-neutral weights via Treynor-Black QP.
 
-    Objective : maximize  sum_i  alpha_i / sigma2_eps_i * w_i
+    Objective : maximize  scores^T w - ridge * ||w - w0||^2
+        where scores = alpha_i / sigma2_eps_i  (appraisal ratio)
+        and   w0     = current portfolio weights (warm start + anchor)
+
+    The L2 term prevents degenerate all-zero solutions and anchors the
+    result near the existing portfolio, so results are graded across all
+    stocks rather than binary ±1.
+
     Constraints:
-        beta_mkt^T w = 0   (market neutral)
-        sum(w)       = 0   (dollar neutral: long $ = short $)
-    Bounds: w_i in [-1, 1] per stock; normalized to gross exposure = 1 after solve.
+        beta_mkt^T w = 0   (market neutral; net exposure unconstrained)
+    Bounds: w_i in [-1, 1]; normalized to gross = 1 after solve.
 
     Parameters
     ----------
-    stock_results : dict {permno: statsmodels result or None}
+    stock_results    : dict {permno: statsmodels result or None}
     selected_permnos : list of permnos
+    current_weights  : dict {permno: weight} or None
+        Current portfolio weights used as warm start. If None, starts from
+        scores projected onto the beta-neutral subspace.
 
     Returns
     -------
@@ -104,28 +113,46 @@ def optimize_beta_neutral(stock_results, selected_permnos):
 
     alphas = np.array(alphas)
     betas_mkt = np.array(betas_mkt)
-    scores = alphas / np.array(idio_vars)   # Treynor-Black appraisal scores
-
+    scores = alphas / np.array(idio_vars)
     n = len(permnos)
 
+    # Anchor: current weights (normalized) or fallback to equal weight
+    if current_weights is not None:
+        w0 = np.array([current_weights.get(p, 0.0) for p in permnos])
+    else:
+        w0 = np.ones(n) / n
+    gross0 = np.abs(w0).sum()
+    if gross0 > 1e-8:
+        w0 = w0 / gross0
+
+    # Ridge strength: small enough not to distort alpha ranking, large enough
+    # to prevent degenerate zeros. Scaled to score magnitude.
+    score_scale = max(np.abs(scores).max(), 1e-8)
+    ridge = 0.1 * score_scale
+
     def objective(w):
-        return -float(np.dot(w, scores))
+        return -(np.dot(w, scores) - ridge * np.dot(w - w0, w - w0))
 
     def jac(w):
-        return -scores
+        return -(scores - 2 * ridge * (w - w0))
 
-    constraints = [
-        {"type": "eq", "fun": lambda w: np.dot(betas_mkt, w)},  # beta neutral only
-    ]
+    constraints = [{"type": "eq", "fun": lambda w: np.dot(betas_mkt, w)}]
     bounds = [(-1.0, 1.0)] * n
-    w0 = np.zeros(n)
 
-    res = minimize(objective, w0, jac=jac, method="SLSQP",
+    # Warm start: project w0 onto beta-neutral subspace
+    beta_norm_sq = np.dot(betas_mkt, betas_mkt)
+    if beta_norm_sq > 1e-12:
+        w_init = w0 - (np.dot(betas_mkt, w0) / beta_norm_sq) * betas_mkt
+    else:
+        w_init = w0.copy()
+    w_init = np.clip(w_init, -1.0, 1.0)
+
+    res = minimize(objective, w_init, jac=jac, method="SLSQP",
                    bounds=bounds, constraints=constraints,
-                   options={"ftol": 1e-12, "maxiter": 1000})
+                   options={"ftol": 1e-12, "maxiter": 2000})
 
-    gross = np.abs(res.x).sum()
-    if not res.success or gross < 1e-8:
+    gross = np.abs(res.x).sum() if res.x is not None else 0
+    if gross < 1e-8:
         return None
 
     w_norm = res.x / gross

@@ -245,13 +245,25 @@ The **appraisal ratio** $\hat{\alpha}_i / \hat{\sigma}_{\varepsilon,i}$ measures
 
 ### 6.4 Solution method
 
-The problem is a **quadratic program** (linear objective, linear constraints, box bounds) solved via Sequential Least Squares Programming (SLSQP). With a linear objective and linear constraints it reduces to a linear program, but SLSQP handles the box bounds cleanly.
+The objective includes a small L2 ridge term to prevent degenerate all-zero solutions:
 
-With only one equality constraint (beta-neutrality), the optimizer has more freedom than a dollar-neutral formulation and will generally find a higher-alpha solution by allowing a net long or short tilt.
+$$\max_{w} \quad \sum_i \frac{\hat{\alpha}_i}{\hat{\sigma}^2_{\varepsilon,i}} w_i - \lambda \| w - w_0 \|^2$$
 
-The gradient of the objective is constant:
+where $w_0$ is the current portfolio weights (normalized) and $\lambda = 0.1 \times \max_i |\text{score}_i|$.
 
-$$\nabla_w \left(\sum_i \frac{\hat{\alpha}_i}{\hat{\sigma}^2_{\varepsilon,i}} w_i\right) = \left(\frac{\hat{\alpha}_1}{\hat{\sigma}^2_{\varepsilon,1}}, \ldots, \frac{\hat{\alpha}_N}{\hat{\sigma}^2_{\varepsilon,N}}\right)$$
+The ridge term does two things:
+1. **Prevents zeros** — a pure LP with one equality constraint pushes all but one variable to a bound (±1) or zero; the ridge forces a graded, spread solution
+2. **Anchors to current portfolio** — the optimizer finds the nearest beta-neutral adjustment rather than an abstract solution, making results actionable
+
+This is solved as a **quadratic program** via SLSQP. The warm start projects the current weights onto the beta-neutral subspace:
+
+$$w_{\text{init}} = w_0 - \frac{\boldsymbol{\beta}^\top w_0}{\boldsymbol{\beta}^\top \boldsymbol{\beta}} \cdot \boldsymbol{\beta}$$
+
+The gradient of the full objective is:
+
+$$\nabla_w = \text{scores} - 2\lambda(w - w_0)$$
+
+With only one equality constraint (beta-neutrality), net exposure is unconstrained — the optimizer tilts net long or short wherever the alpha opportunity is greatest.
 
 ### 6.5 Interpretation of results
 
@@ -336,39 +348,9 @@ A low R² does not mean the model is wrong — it means the stocks have high idi
 
 ---
 
-## 9. Constructed Factors (Quintile Spreads)
+## 9. Universe Construction
 
-Factors can also be constructed from stock characteristics using a long-short portfolio:
-
-### 9.1 Procedure (each month)
-
-1. Rank all stocks in the universe by a characteristic (e.g., trailing volatility)
-2. Form quintiles (5 equal groups)
-3. Long quintile 5 (highest), short quintile 1 (lowest)
-4. Factor return = return of long leg minus return of short leg
-
-$$F_{k,t} = \bar{r}_{\text{Q5},t} - \bar{r}_{\text{Q1},t}$$
-
-### 9.2 Characteristics used (available in `src/factors.py`)
-
-| Factor | Characteristic | Source |
-|--------|---------------|--------|
-| Volatility | Trailing 12m std(ret) | CRSP |
-| Liquidity | Trailing 12m avg dollar volume (log) | CRSP |
-| Log Size | log(market cap) | CRSP |
-| Leverage | (LT debt + ST debt) / total assets | Compustat |
-| Growth | Year-over-year sales growth | Compustat |
-| Value | Book equity / market cap | Compustat |
-
-### 9.3 Look-ahead bias prevention
-
-Compustat annual reports are only available ~6 months after fiscal year-end. To avoid using future information, fundamentals are lagged by 6 months before computing any characteristic.
-
----
-
-## 10. Universe Construction
-
-### 10.1 Top-N by market cap
+### 9.1 Top-N by market cap
 
 Each month, rank all eligible stocks by market capitalization and keep the top 3,000:
 
@@ -378,7 +360,7 @@ Eligibility filters (from CRSP):
 - `shrcd ∈ {10, 11}` — ordinary common shares only (excludes REITs, ADRs, ETFs)
 - `exchcd ∈ {1, 2, 3}` — NYSE, AMEX, NASDAQ only
 
-### 10.2 Market cap calculation
+### 9.2 Market cap calculation
 
 $$\text{mcap}_{i,t} = |P_{i,t}| \times \text{shrout}_{i,t}$$
 
@@ -386,7 +368,7 @@ CRSP sometimes reports negative prices (indicating a bid-ask midpoint was used).
 
 ---
 
-## 11. Key Identities Summary
+## 10. Key Identities Summary
 
 | Quantity | Formula |
 |----------|---------|
