@@ -74,20 +74,19 @@ def portfolio_returns(permnos, crsp, weight_scheme="equal", shares=None, dollars
 
 
 def optimize_beta_neutral(stock_results, selected_permnos, current_weights=None):
-    """Find beta-neutral, alpha-maximizing weights (Treynor-Black LP).
+    """Find beta-neutral weights maximizing idiosyncratic variance ratio.
 
-    Solves the true Treynor-Black problem as a Linear Program:
+    Solves an LP:
 
         maximize  scores^T w
         subject to  beta_mkt^T w = 0   (market neutral)
                     w_i in [-1, 1]      (position limits)
 
-    where scores = alpha_i / sigma2_eps_i (appraisal ratio).
+    where scores_i = sigma2_idio_i / sigma2_total_i = 1 - R2_i.
 
-    LP optimal solutions are at vertices of the feasible polytope, so many
-    weights will be 0 or ±1. Zero weights are meaningful — those stocks
-    do not contribute alpha relative to their beta cost. Non-zero weights
-    are the globally optimal allocation.
+    Stocks with higher idiosyncratic variance fraction (less factor-explained)
+    receive higher scores. LP optimal solutions are at vertices of the feasible
+    polytope, so many weights will be 0 or ±1.
 
     After solving, normalizes to gross exposure = 1.
 
@@ -105,16 +104,15 @@ def optimize_beta_neutral(stock_results, selected_permnos, current_weights=None)
     if len(permnos) < 2:
         return None
 
-    alphas, betas_mkt, idio_vars = [], [], []
+    betas_mkt, scores = [], []
     for p in permnos:
         res = stock_results[p]
-        alphas.append(res.params.get("const", 0.0))
         betas_mkt.append(res.params.get("mktrf", 0.0))
-        idio_vars.append(max(res.mse_resid, 1e-10))
+        # sigma2_idio / sigma2_total = 1 - R^2
+        scores.append(max(1.0 - res.rsquared, 0.0))
 
-    alphas = np.array(alphas)
     betas_mkt = np.array(betas_mkt)
-    scores = alphas / np.array(idio_vars)
+    scores = np.array(scores)
     n = len(permnos)
 
     res = linprog(

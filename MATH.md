@@ -175,6 +175,24 @@ Using **gross exposure** as the denominator (not net) prevents the weights from 
 
 **Key identity:** $\sum_i |w_i| = 1$ (gross-exposure-weighted), but $\sum_i w_i \neq 1$ for long-short portfolios.
 
+### 4.5 Breadth
+
+**Breadth** measures how many stocks are effectively contributing to the portfolio, accounting for concentration:
+
+$$\text{Breadth} = \frac{1}{\sum_{i=1}^{N} w_i^2}$$
+
+| Portfolio type | Breadth | Interpretation |
+|----------------|---------|---------------|
+| Equal-weight, $N$ stocks | $N$ | Maximum possible breadth for $N$ stocks |
+| Single stock | $1$ | Fully concentrated |
+| Long-short (opt) | $1 \leq B \leq N$ | Effective number of independent bets |
+
+**Why $1/\sum w_i^2$?** This is the inverse of the Herfindahl-Hirschman Index (HHI) applied to portfolio weights. When all $N$ weights are equal ($w_i = 1/N$), $\sum w_i^2 = 1/N$, so breadth $= N$. When one stock dominates, $\sum w_i^2 \to 1$ and breadth $\to 1$. It is a continuous, weight-sensitive measure of diversification.
+
+**For long-short portfolios**, weights are gross-normalized ($\sum |w_i| = 1$), so the formula still applies — a concentrated long-short book with one big bet scores close to 1, while a balanced book of many positions scores high.
+
+The LP optimizer will often produce low breadth (many weights at zero or ±1), since vertex solutions concentrate bets on the highest-scoring stocks that clear the beta constraint.
+
 ---
 
 ## 5. Market Neutrality
@@ -215,9 +233,9 @@ Market neutrality requires $\mathbf{w}^\top \boldsymbol{\beta} = 0$. In practice
 
 ### 6.1 Problem statement
 
-Given a set of stocks with estimated alphas $\hat{\alpha}_i$, market betas $\hat{\beta}_i$, and idiosyncratic variances $\hat{\sigma}^2_{\varepsilon,i}$, find weights $w_i$ that:
+Given a set of stocks with market betas $\hat{\beta}_i$, idiosyncratic variances $\hat{\sigma}^2_{\varepsilon,i}$, and total return variances $\hat{\sigma}^2_{total,i}$, find weights $w_i$ that:
 
-$$\max_{w} \quad \sum_i \frac{\hat{\alpha}_i}{\hat{\sigma}^2_{\varepsilon,i}} w_i \qquad \text{(maximize appraisal-ratio-weighted alpha)}$$
+$$\max_{w} \quad \sum_i \frac{\hat{\sigma}^2_{\varepsilon,i}}{\hat{\sigma}^2_{total,i}} \, w_i \qquad \text{(maximize idiosyncratic variance fraction)}$$
 
 $$\text{subject to} \quad \sum_i \hat{\beta}_i \, w_i = 0 \quad \text{(market neutral)}$$
 
@@ -225,54 +243,58 @@ $$w_i \in [-1, 1] \quad \text{(per-stock position limit)}$$
 
 After solving, normalize so $\sum_i |w_i| = 1$ (gross exposure = 1). This preserves the beta-neutrality constraint since it is linear and homogeneous: if $\boldsymbol{\beta}^\top w = 0$ then $\boldsymbol{\beta}^\top (w/c) = 0$ for any scalar $c$.
 
-Net exposure $\sum_i w_i$ is unconstrained — the optimizer may tilt net long or net short depending on where the alpha opportunities lie.
+Net exposure $\sum_i w_i$ is unconstrained — the optimizer may tilt net long or net short depending on score distribution.
 
-### 6.2 Why $\alpha / \sigma^2_\varepsilon$?
+### 6.2 Why $\sigma^2_\varepsilon / \sigma^2_{total}$?
 
-The **appraisal ratio** $\hat{\alpha}_i / \hat{\sigma}_{\varepsilon,i}$ measures how much excess return a stock delivers per unit of idiosyncratic risk. Weighting the objective by $1/\hat{\sigma}^2_{\varepsilon,i}$ (rather than just maximizing raw alpha) means:
+The **idiosyncratic variance ratio** $\hat{\sigma}^2_{\varepsilon,i} / \hat{\sigma}^2_{total,i}$ measures how much of a stock's risk is unexplained by systematic factors. By the OLS variance decomposition:
 
-- Stocks with high alpha but noisy estimates (large $\hat{\sigma}^2_\varepsilon$) get down-weighted
-- Stocks with stable, consistent alpha get up-weighted
-- This is the **Treynor-Black model** (1973): the optimal active weight in a stock is proportional to its appraisal ratio
+$$\frac{\hat{\sigma}^2_{\varepsilon,i}}{\hat{\sigma}^2_{total,i}} = 1 - R^2_i$$
+
+where $R^2_i$ is the coefficient of determination from the per-stock factor regression. This ratio:
+
+- Equals **1** for a stock whose returns are entirely idiosyncratic (no factor exposure)
+- Equals **0** for a stock perfectly explained by the factors
+- Prioritizes stocks with high **stock-specific** risk — those less driven by systematic exposures receive higher scores
+- Is always in $[0, 1]$, bounded and scale-free
 
 ### 6.3 Inputs from the factor model
 
 | Input | Source |
 |-------|--------|
-| $\hat{\alpha}_i$ | `params["const"]` from per-stock OLS |
 | $\hat{\beta}_{mkt,i}$ | `params["mktrf"]` from per-stock OLS |
-| $\hat{\sigma}^2_{\varepsilon,i}$ | `mse_resid` from per-stock OLS (= RSS / (T − K − 1)) |
+| $\hat{\sigma}^2_{\varepsilon,i} / \hat{\sigma}^2_{total,i}$ | `1 - rsquared` from per-stock OLS |
 
 ### 6.4 Solution method
 
 This is solved as a **Linear Program** via the HiGHS solver (`scipy.optimize.linprog`):
 
-$$\max_{w} \quad \sum_i \frac{\hat{\alpha}_i}{\hat{\sigma}^2_{\varepsilon,i}} w_i \qquad \text{subject to} \quad \boldsymbol{\beta}^\top w = 0, \quad w_i \in [-1, 1]$$
+$$\max_{w} \quad \sum_i (1 - R^2_i) \, w_i \qquad \text{subject to} \quad \boldsymbol{\beta}^\top w = 0, \quad w_i \in [-1, 1]$$
 
 **Global optimality is guaranteed.** The feasible set (a hyperplane intersected with a box) is convex. The LP optimum is at a vertex of this polytope — HiGHS finds it exactly.
 
-**Why many weights are zero or ±1.** An LP vertex has at most $m$ non-basic variables not at their bounds, where $m$ is the number of equality constraints. With $m = 1$ (beta-neutrality), all but at most one stock will be at a bound (long at +1, short at −1) or zero. This is not a numerical artifact — it is the mathematically correct solution. Zero weights mean that stock does not improve the objective given the beta constraint.
+**Why many weights are zero or ±1.** An LP vertex has at most $m$ non-basic variables not at their bounds, where $m$ is the number of equality constraints. With $m = 1$ (beta-neutrality), all but at most one stock will be at a bound (long at +1, short at −1) or zero. This is not a numerical artifact — it is the mathematically correct solution.
 
-**Why zeros are meaningful.** A stock gets $w_i = 0$ when its appraisal-adjusted score does not justify a position once the beta constraint is satisfied. Adding it at any non-zero weight either reduces expected alpha or violates beta-neutrality.
+**Score interpretation.** Since all scores $(1 - R^2_i) \geq 0$, the LP goes long the highest-idio-fraction stocks and shorts whichever stocks are needed to satisfy the beta constraint. Stocks at zero weight neither improve the objective nor are required for beta cancellation.
 
-With only one equality constraint, net exposure $\sum_i w_i$ is unconstrained — the optimizer tilts net long or short wherever the alpha opportunity is greatest.
+With only one equality constraint, net exposure $\sum_i w_i$ is unconstrained — the optimizer tilts net long or short wherever the idio-fraction score is highest.
 
 ### 6.5 Interpretation of results
 
 | Result | Meaning |
 |--------|---------|
-| $w_i > 0$ | Long — stock has positive appraisal ratio after beta adjustment |
-| $w_i < 0$ | Short — stock has negative appraisal ratio; shorting it adds alpha |
+| $w_i > 0$ | Long — stock has high idiosyncratic variance fraction (low $R^2$) |
+| $w_i < 0$ | Short — needed to offset beta of longs while minimizing score loss |
 | $\sum_i \hat{\beta}_i w_i \approx 0$ | Portfolio has no net market exposure |
 | $\sum_i w_i \neq 0$ (generally) | Net long or short tilt — unconstrained |
-| $\sum_i \hat{\alpha}_i w_i$ | Expected monthly alpha of the optimized portfolio |
+| $\sum_i (1 - R^2_i) w_i$ | Objective value: idio-fraction-weighted net exposure |
 
 ### 6.6 Limitations
 
-- Alphas from a factor model are **backward-looking** — high historical alpha does not guarantee future alpha
+- $R^2$ is **backward-looking** — a stock's idiosyncratic fraction in-sample may not persist out-of-sample
+- High idiosyncratic variance means more stock-specific risk, not necessarily more return
 - The model ignores **transaction costs**, **liquidity**, and **short-selling constraints**
-- Idiosyncratic variances are estimated with error, especially for short histories
-- Net exposure is unconstrained — the optimizer will tilt net long or short wherever alpha is highest; add $\sum w_i = 0$ as a second constraint if dollar-neutrality is required
+- Net exposure is unconstrained — add $\sum w_i = 0$ as a second constraint if dollar-neutrality is required
 
 ---
 
@@ -368,7 +390,8 @@ CRSP sometimes reports negative prices (indicating a bid-ask midpoint was used).
 | Market-neutral short ratio | $x = \beta_A / \beta_B$ (dollars) |
 | OLS estimator | $\hat{\boldsymbol{\beta}} = (\mathbf{X}^\top\mathbf{X})^{-1}\mathbf{X}^\top\mathbf{y}$ |
 | R² | $1 - \text{RSS}/\text{TSS}$ |
-| Idio variance fraction | $1 - R^2$ |
+| Idio variance fraction | $\hat{\sigma}^2_\varepsilon / \hat{\sigma}^2_{total} = 1 - R^2$ |
+| Portfolio breadth | $1 / \sum_i w_i^2$ |
 | Total factor variance | $\boldsymbol{\hat{\beta}}^\top \boldsymbol{\Sigma}_F \boldsymbol{\hat{\beta}}$ |
 | Cumulative return | $\prod_t (1 + r_t) - 1$ |
 | Annualized return | $(1 + r_{\text{cum}})^{12/T} - 1$ |

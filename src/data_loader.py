@@ -98,6 +98,49 @@ def fetch_ff_factors(conn, start_date, end_date):
     return df
 
 
+def fetch_crsp_daily(conn, start_date, end_date):
+    """Pull CRSP daily stock data (crsp.dsf) joined with names table."""
+    shrcd_list = ",".join(str(s) for s in VALID_SHRCD)
+    exchcd_list = ",".join(str(e) for e in VALID_EXCHCD)
+
+    df = query(conn, f"""
+        SELECT d.permno, d.date, d.ret, d.retx, d.prc, d.shrout, d.vol,
+               n.exchcd, n.shrcd, n.ticker, n.comnam, n.siccd
+        FROM crsp.dsf d
+        LEFT JOIN crsp.dsenames n
+            ON d.permno = n.permno
+            AND d.date BETWEEN n.namedt AND n.nameendt
+        WHERE d.date BETWEEN '{start_date}' AND '{end_date}'
+          AND n.shrcd IN ({shrcd_list})
+          AND n.exchcd IN ({exchcd_list})
+        ORDER BY d.date, d.permno
+    """)
+
+    df["date"] = pd.to_datetime(df["date"])
+    df["permno"] = df["permno"].astype("int64")
+    df["ret"] = pd.to_numeric(df["ret"], errors="coerce")
+    df["prc"] = pd.to_numeric(df["prc"], errors="coerce")
+    df["shrout"] = pd.to_numeric(df["shrout"], errors="coerce")
+    df["mcap"] = np.abs(df["prc"]) * df["shrout"]
+    df = df.dropna(subset=["ret"])
+    return df
+
+
+def fetch_ff_factors_daily(conn, start_date, end_date):
+    """Pull Fama-French 5 factors + momentum + risk-free rate at daily frequency."""
+    df = query(conn, f"""
+        SELECT f3.date, f3.mktrf, f3.smb, f3.hml, f3.umd, f3.rf,
+               f5.rmw, f5.cma
+        FROM ff.factors_daily f3
+        LEFT JOIN ff.fivefactors_daily f5
+            ON f3.date = f5.date
+        WHERE f3.date BETWEEN '{start_date}' AND '{end_date}'
+        ORDER BY f3.date
+    """)
+    df["date"] = pd.to_datetime(df["date"])
+    return df
+
+
 def fetch_compustat_annual(conn, start_date, end_date):
     """Pull Compustat annual fundamentals. Returns None if unavailable."""
     try:

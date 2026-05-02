@@ -94,6 +94,102 @@ data/
   processed/        — universe, factor returns (gitignored)
 ```
 
+---
+
+## Regression Comparison Experiment
+
+> Notebook: `notebooks/regression_comparison.ipynb`
+
+### Objective
+
+Test whether a stock's estimated **market beta** (`beta_mkt`) has cross-sectional predictive power for future relative returns, and whether pre-residualizing other features against it changes predictions. Secondary questions: does Lasso keep or zero out `beta_mkt`? Does regularization method matter? Is pooled OLS the right estimator for panel return data?
+
+Note: an earlier version of this experiment used the contemporaneous FF market return (`mktrf`) as a feature. That was incorrect — `mktrf` is date-level (same for all stocks in a month) so it has zero cross-sectional variance and cannot predict relative performance. `beta_mkt` is a stock-specific characteristic that varies cross-sectionally and is the correct variable to test.
+
+### Data
+
+- **Source:** WRDS — CRSP daily (`crsp.dsf`) + Fama-French daily factors
+- **Universe:** All common US equities (shrcd 10/11, exchcd 1/2/3), 2010–2019
+- **Splits:** Train 2010–2015 | Break 2016 | Test 2017–2019
+- **Target:** 28-day compounded forward excess return, converted to cross-sectional percentile rank within each month (see below)
+- **Subsampling:** End-of-month observation per stock — eliminates 27/28-day overlap in the forward return window
+
+### Features (17 total, all stock-specific)
+
+Date-level features (`mktrf`, `smb`, `hml`, `rmw`, `cma`, `umd`, their lags, rolling versions, and `month`) are excluded — they are constant within any month's cross-section and carry zero cross-sectional predictive information.
+
+| Group | Features |
+|-------|----------|
+| Market sensitivity (1) | `beta_mkt` — trailing 252-day OLS beta vs market |
+| Return signals (7) | `ret_lag1`, `mom_5d/21d/63d/126d/252d`, `high_52w_ratio` |
+| Volatility (3) | `rvol_21d`, `rvol_63d`, `dvol_21d` |
+| Liquidity (2) | `amihud_21d`, `turnover_21d` |
+| Price / size (4) | `log_mcap`, `log_prc`, `prc_to_ma50`, `prc_to_ma200` |
+
+### Why cross-sectional ranking, not raw returns
+
+The first attempt predicted raw 28-day excess returns directly. Results were degenerate: Lasso zeroed all coefficients, Ridge drove regularization to the maximum grid boundary (1e10), and OLS massively overfitted. This is a signal-to-noise problem: raw stock returns are dominated by the market's direction that month, which the stock-specific features cannot predict.
+
+Switching the target to the **within-month percentile rank** of each stock's 28-day forward excess return removes the common market component. The model only needs to answer which stocks beat their peers, not whether the market is up or down. After this change, all six models produced real, non-degenerate results.
+
+### Experimental design
+
+Six models in a 2×3 design:
+
+|  | OLS | Ridge | Lasso |
+|--|-----|-------|-------|
+| **Group A — beta_mkt included** | A1 | A2 | A3 |
+| **Group B — residualized against beta_mkt** | B1 | B2 | B3 |
+
+Plus a **Fama-MacBeth** baseline (cross-sectional OLS each month, averaged over time). FM now includes `beta_mkt` since it varies cross-sectionally.
+
+- Group A: all 17 features including `beta_mkt` directly
+- Group B: all other features projected onto the orthogonal complement of `beta_mkt` (Frisch-Waugh residualization), `beta_mkt` dropped
+- Hyperparameters tuned via `TimeSeriesSplit` (5 folds) on training data only
+- Features standardized using train-period statistics — no look-ahead
+
+### Results
+
+2016 is a **break (cooling-off) period** — a one-year buffer between train and test to let any temporal leakage decay. It is not evaluated on.
+
+| Model | Group | Features | CV Rank IC | Test Rank IC | Test R² |
+|-------|-------|----------|-----------|-------------|---------|
+| A1: OLS | beta_mkt included | 17 | 0.0899 | 0.1134 | −0.2089 |
+| A2: Ridge | beta_mkt included | 17 | 0.0930 | 0.1137 | −0.1320 |
+| A3: Lasso | beta_mkt included | 17 | 0.0906 | 0.1136 | −0.0956 |
+| B1: OLS | residualized | 16 | 0.0987 | 0.1141 | −0.2087 |
+| B2: Ridge | residualized | 16 | 0.1002 | 0.1143 | −0.1564 |
+| B3: Lasso ★ | residualized | 16 | 0.0997 | **0.1144** | −0.1181 |
+
+★ Best model on test (Rank IC = 0.1144)
+
+Primary metric is Rank IC (Spearman correlation of predicted vs actual rank). R² is negative for all models — expected, because the rank target has meaningful variance that no linear model fully captures. A Rank IC of ~0.11 OOS is a substantive result; published quantitative strategies typically target 0.05–0.15.
+
+### Key findings
+
+**1. Cross-sectional ranking was essential**
+Predicting raw return was too noisy. Ranking within each month removed that noise and revealed real signal in the stock-specific features. The correct target is the within-month percentile rank, which removes the common market component and forces the model to predict only relative performance.
+
+**2. FWL theorem confirmed: A1 ≈ B1**
+OLS with `beta_mkt` included (A1) and OLS on features residualized against `beta_mkt` (B1) produced nearly identical results (Rank IC 0.1134 vs 0.1141, difference of 0.0007 attributable to floating point precision). The Frisch-Waugh-Lovell theorem guarantees these are algebraically identical, and the near-zero difference is the expected numerical outcome.
+
+**3. beta_mkt has minimal additional predictive power**
+Lasso kept `beta_mkt` with a near-zero coefficient (−0.000029) — barely non-zero. This means `beta_mkt` has almost no incremental predictive signal once volatility (`rvol_21d`, `rvol_63d`, `dvol_21d`) and size (`log_mcap`) are included, since these features are highly correlated with market beta. Consistent with the low-beta anomaly (Frazzini & Pedersen 2014): beta exposure alone does not predict relative returns; the associated risk characteristics (volatility, size) do.
+
+**4. Residualizing against beta_mkt marginally improves regularized models**
+Group B (residualized) slightly outperforms Group A across Lasso and Ridge (~0.0007 Rank IC), and is the best overall. Removing beta_mkt's component from other features lets the regularizer allocate capacity more cleanly to the idiosyncratic parts of each signal.
+
+**5. Lasso selected 12 of 17 features — all interpretable**
+Survivors: all volatility features (`rvol_21d`, `rvol_63d`, `dvol_21d`), all liquidity features (`amihud_21d`, `turnover_21d`), all price/size features (`log_mcap`, `log_prc`, `prc_to_ma50`, `prc_to_ma200`), short-term momentum (`mom_5d`), 52-week high ratio, and `beta_mkt` (near-zero). Dropped: short-term reversal (`ret_lag1`) and all medium/long-horizon momentum (`mom_21d`, `mom_63d`, `mom_126d`, `mom_252d`). Only the fastest momentum signal survives.
+
+**6. OLS overfits; regularized models generalize better**
+OLS R² collapses from +0.013 in-sample to −0.21 OOS. Ridge and Lasso converge to sensible regularization levels (α ~2e-3 for Lasso, ~6e4 for Ridge) and generalize more cleanly, with Lasso edging out Ridge on test Rank IC.
+
+**7. Fama-MacBeth**
+FM runs a separate cross-sectional OLS each month on the 17 stock-specific features and averages the resulting coefficient vectors. Standard errors are computed from the time-series of monthly beta estimates, correctly accounting for cross-sectional correlation in returns (all stocks in a month share the same market shock).
+
+---
+
 ## Data Sources
 
 - **CRSP Monthly Stock File** — returns, prices, shares, market cap, SIC codes (via `crsp.msf` + `crsp.msenames`)

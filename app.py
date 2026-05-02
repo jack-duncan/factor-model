@@ -132,7 +132,7 @@ with st.sidebar:
             if scheme == "shares":
                 sampled_permnos = sampled["permno"].tolist()
                 latest = (
-                    crsp_filtered[crsp_filtered["permno"].isin(sampled_permnos)]
+                    crsp.loc[_mask][crsp.loc[_mask]["permno"].isin(sampled_permnos)]
                     .sort_values("date")
                     .drop_duplicates("permno", keep="last")
                     .set_index("permno")[["prc", "mcap"]]
@@ -433,10 +433,14 @@ with tab_holdings:
         with col3:
             ann_vol = port_ret["ret"].std() * (12 ** 0.5)
             st.metric("Annualized Volatility", f"{ann_vol:.1%}")
+            _cw_vals = np.array(list(current_weights_numeric.values()))
+            _cw_ssq = (_cw_vals ** 2).sum()
+            breadth_chosen = 1.0 / _cw_ssq if _cw_ssq > 0 else float("nan")
+            st.metric("Breadth (1/Σwᵢ²)", f"{breadth_chosen:.2f}")
 
     # ── Optimized portfolio metrics ───────────────────────────────────────────
     if opt_weights is not None:
-        st.caption("Treynor-Black: maximizes α/σ²ₑ anchored to current weights, β_mkt = 0.")
+        st.caption("Beta-neutral optimizer: maximizes σ²ᵢdio/σ²total per stock, β_mkt = 0.")
         df_opt = crsp_filtered[crsp_filtered["permno"].isin(selected_permnos)].copy()
         df_opt["w"] = df_opt["permno"].map(opt_weights).fillna(0)
         opt_port_ret = (
@@ -455,6 +459,9 @@ with tab_holdings:
                 for p in selected_permnos
             )
             opt_net = sum(opt_weights.get(p, 0) for p in selected_permnos)
+            _ow_vals = np.array([opt_weights.get(p, 0) for p in selected_permnos])
+            _ow_ssq = (_ow_vals ** 2).sum()
+            breadth_opt = 1.0 / _ow_ssq if _ow_ssq > 0 else float("nan")
 
             oc1, oc2, oc3 = st.columns(3)
             with oc1:
@@ -470,6 +477,7 @@ with tab_holdings:
             with oc3:
                 opt_vol = opt_port_ret["ret"].std() * (12 ** 0.5)
                 st.metric("Annualized Volatility (opt)", f"{opt_vol:.1%}")
+                st.metric("Breadth (opt) (1/Σwᵢ²)", f"{breadth_opt:.2f}")
 
 
 # ── Tab 2: Factor Exposures ─────────────────────────────────────────────────
